@@ -8,10 +8,10 @@ import cv2
 
 import shutil
 
-def convert_everything_to_mp4():
-    cmd = 'bash scripts/swf2mp4.sh'
+#def convert_everything_to_mp4():
+ #   cmd = 'bash scripts/swf2mp4.sh'
 
-    os.system(cmd)
+  #  os.system(cmd)
 
 
 def video_to_frames(video_path, size=None):
@@ -102,25 +102,27 @@ def extract_all_yt_instances(content):
             else:
                 cnt += 1
 
-                src_video_path = os.path.join('raw_videos_mp4', video_id + '.mp4')
+                src_video_path = inst['url']
                 dst_video_path = os.path.join('videos', video_id + '.mp4')
 
+                print(f"Checking source: {src_video_path}")
                 if os.path.exists(dst_video_path):
-                    print('{} exists.'.format(dst_video_path))
+                    print(f"{dst_video_path} exists. Skipping.")
                     continue
 
                 if not os.path.exists(src_video_path):
+                    print(f"Source video not found: {src_video_path}. Skipping.")
                     continue
 
-                print(cnt, dst_video_path)
+                print(f"Copying {src_video_path} to {dst_video_path}")
                 shutil.copyfile(src_video_path, dst_video_path)
 
         
 def main():
     # 1. Convert .swf, .mkv file to mp4.
-    convert_everything_to_mp4()
+   # convert_everything_to_mp4()
 
-    content = json.load(open('WLASL_v0.3.json'))
+    content = json.load(open(r'MLR511-ArabicSignLanguage-Dataset-MP4\arabic_sign_language_dataset.json'))
     extract_all_yt_instances(content)
 
 

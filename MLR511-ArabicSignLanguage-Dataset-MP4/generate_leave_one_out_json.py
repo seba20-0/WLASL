@@ -16,6 +16,8 @@ GESTURE_MAP = {
 }
 
 DATASET_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Define videos folder
+VIDEOS_FOLDER = os.path.join(DATASET_ROOT, 'videos')
 
 # List of users for leave-one-out
 leave_out_users = ["user01", "user08", "user11"]
@@ -27,17 +29,11 @@ gesture_to_id = {name: idx for idx, name in enumerate(GESTURE_MAP.values())}
 # Get all video info
 video_info = []
 for user in all_users:
-    user_path = os.path.join(DATASET_ROOT, user)
-    if not os.path.isdir(user_path):
-        continue
     for gesture_code, gesture_name in GESTURE_MAP.items():
-        gesture_path = os.path.join(user_path, gesture_code)
-        if not os.path.isdir(gesture_path):
-            continue
-        for rep in [d for d in os.listdir(gesture_path) if d.startswith("R")]:
-            video_filename = rep if rep.endswith('.mp4') else f"{rep}.mp4"
-            video_file_rel = os.path.join('MLR511-ArabicSignLanguage-Dataset-MP4', user, gesture_code, video_filename)
-            video_id = f"{user}_{gesture_code}_{rep}"
+        for rep in range(1, 11):
+            video_id = f"{user}_{gesture_code}_R{str(rep).zfill(2)}"
+            video_filename = f"{video_id}.mp4"
+            video_file_rel = os.path.join('videos', video_filename)
             video_info.append({
                 "video_id": video_id,
                 "user": user,
@@ -53,7 +49,7 @@ for test_user in leave_out_users:
         # Assign subset
         subset = "test" if info["user"] == test_user else "train"
         # Get number of frames
-        video_path = os.path.join(DATASET_ROOT, info["user"], info["gesture"], info["video_id"].split('_')[-1] + ".mp4")
+        video_path = os.path.join(VIDEOS_FOLDER, f"{info['video_id']}.mp4")
         if os.path.exists(video_path):
             import cv2
             cap = cv2.VideoCapture(video_path)

@@ -127,10 +127,11 @@ def make_dataset(split_file, split, root, mode, num_classes):
             c_ = data[vid]['action'][0]
             label[c_][l] = 1
 
-        if len(vid) == 5:
-            dataset.append((vid, label, src, 0, data[vid]['action'][2] - data[vid]['action'][1]))
-        elif len(vid) == 6:  ## sign kws instances
-            dataset.append((vid, label, src, data[vid]['action'][1], data[vid]['action'][2] - data[vid]['action'][1]))
+        # General handling: use provided start and duration regardless of video_id length
+        start = data[vid]['action'][1]
+        duration = data[vid]['action'][2] - data[vid]['action'][1]
+        # In original WLASL numeric ids, some entries started at 0; preserve that behavior
+        dataset.append((vid, label, src, start, duration))
 
         i += 1
     print("Skipped videos: ", count_skipping)

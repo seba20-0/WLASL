@@ -22,11 +22,13 @@ from datasets.nslt_dataset import NSLT as Dataset
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-mode', type=str, help='rgb or flow')
-parser.add_argument('-save_model', type=str)
-parser.add_argument('-root', type=str)
-parser.add_argument('--num_class', type=int)
+parser = argparse.ArgumentParser(description='Train I3D on NSLT/WLASL-style JSON splits')
+parser.add_argument('--mode', type=str, default='rgb', choices=['rgb', 'flow'], help='rgb or flow')
+parser.add_argument('--save_model', type=str, default='checkpoints/', help='Directory to save checkpoints')
+parser.add_argument('--video_root', type=str, default=None, help='Path to folder with videos (*.mp4).')
+parser.add_argument('--train_split', type=str, default=None, help='Path to nslt_*.json split file.')
+parser.add_argument('--config_file', type=str, default='configfiles/asl2000.ini', help='INI config file for training')
+parser.add_argument('--weights', type=str, default=None, help='Optional path to resume weights (.pt)')
 
 args = parser.parse_args()
 
@@ -39,8 +41,8 @@ torch.backends.cudnn.benchmark = False
 
 def run(configs,
         mode='rgb',
-        root='/ssd/Charades_v1_rgb',
-        train_split='charades/charades.json',
+        root=None,
+        train_split=None,
         save_model='',
         weights=None):
     print(configs)
@@ -64,10 +66,17 @@ def run(configs,
     # setup the model
     if mode == 'flow':
         i3d = InceptionI3d(400, in_channels=2)
-        i3d.load_state_dict(torch.load('weights/flow_imagenet.pt'))
+        default_w = 'weights/flow_imagenet.pt'
     else:
         i3d = InceptionI3d(400, in_channels=3)
-        i3d.load_state_dict(torch.load('weights/rgb_imagenet.pt'))
+        default_w = 'weights/rgb_imagenet.pt'
+
+    # Try to load default ImageNet weights if present; skip otherwise
+    if os.path.exists(default_w):
+        print(f'Loading default weights: {default_w}')
+        i3d.load_state_dict(torch.load(default_w))
+    else:
+        print(f'No default weights found at {default_w}; training from scratch or provided --weights')
 
     num_classes = dataset.num_classes
     i3d.replace_logits(num_classes)
@@ -76,8 +85,10 @@ def run(configs,
         print('loading weights {}'.format(weights))
         i3d.load_state_dict(torch.load(weights))
 
-    i3d.cuda()
-    i3d = nn.DataParallel(i3d)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    i3d.to(device)
+    if device.type == 'cuda':
+        i3d = nn.DataParallel(i3d)
 
     lr = configs.init_lr
     weight_decay = configs.adam_weight_decay
@@ -110,7 +121,7 @@ def run(configs,
             num_iter = 0
             optimizer.zero_grad()
 
-            confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int)
+            confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
             # Iterate over data.
             for data in dataloaders[phase]:
                 num_iter += 1
@@ -122,9 +133,9 @@ def run(configs,
                 inputs, labels, vid = data
 
                 # wrap them in Variable
-                inputs = inputs.cuda()
+                inputs = inputs.to(device)
                 t = inputs.size(2)
-                labels = labels.cuda()
+                labels = labels.to(device)
 
                 per_frame_logits = i3d(inputs, pretrained=False)
                 # upsample to input size
@@ -188,16 +199,17 @@ def run(configs,
 
 
 if __name__ == '__main__':
-    # WLASL setting
-    mode = 'rgb'
-    root = {'word': '../../data/WLASL2000'}
+    # Default to args; fall back to example paths if not provided
+    mode = args.mode
+    save_model = args.save_model
+    train_split = args.train_split if args.train_split is not None else 'preprocess/nslt_2000.json'
+    video_root = args.video_root if args.video_root is not None else '../../data/WLASL2000'
+    weights = args.weights
+    config_file = args.config_file
 
-    save_model = 'checkpoints/'
-    train_split = 'preprocess/nslt_2000.json'
+    os.makedirs(save_model, exist_ok=True)
 
-    # weights = 'archived/asl2000/FINAL_nslt_2000_iters=5104_top1=32.48_top5=57.31_top10=66.31.pt'
-    weights = None
-    config_file = 'configfiles/asl2000.ini'
+    root = {'word': video_root}
 
     configs = Config(config_file)
     print(root, train_split)

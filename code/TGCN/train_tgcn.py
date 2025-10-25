@@ -1,6 +1,5 @@
 import logging
 import os
-import argparse
 
 import numpy as np
 import torch
@@ -16,7 +15,7 @@ from train_utils import train, validation
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
-def run(split_file, pose_data_root, configs, save_model_to=None, subset_name="dataset"):
+def run(split_file, pose_data_root, configs, save_model_to=None):
     epochs = configs.max_epochs
     log_interval = configs.log_interval
     num_samples = configs.num_samples
@@ -96,9 +95,8 @@ def run(split_file, pose_data_root, configs, save_model_to=None, subset_name="da
         if val_score[0] > best_test_acc:
             best_test_acc = val_score[0]
             best_epoch_num = epoch
-            ckpt_dir = os.path.join('checkpoints', subset_name)
-            os.makedirs(ckpt_dir, exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(ckpt_dir, 'gcn_epoch={}_val_acc={}.pth'.format(
+
+            torch.save(model.state_dict(), os.path.join('checkpoints', subset, 'gcn_epoch={}_val_acc={}.pth'.format(
                 best_epoch_num, best_test_acc)))
 
     utils.plot_curves()
@@ -110,23 +108,18 @@ def run(split_file, pose_data_root, configs, save_model_to=None, subset_name="da
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train TGCN on pose keypoints using WLASL-style split JSON")
-    parser.add_argument('--split_file', type=str, required=True,
-                        help='Path to WLASL-style JSON split file (list of glosses and instances).')
-    parser.add_argument('--pose_root', type=str, required=True,
-                        help='Root folder containing pose JSONs: <pose_root>/<video_id>/image_00001_keypoints.json ...')
-    parser.add_argument('--config_file', type=str, default=os.path.join('code', 'TGCN', 'configs', 'asl100.ini'),
-                        help='INI config for training hyperparameters.')
-    parser.add_argument('--subset_name', type=str, default='custom',
-                        help='Name used to group checkpoints under checkpoints/<subset_name>.')
-    args = parser.parse_args()
+    root = '/media/anudisk/github/WLASL'
 
-    os.makedirs('output', exist_ok=True)
-    configs = Config(args.config_file)
+    subset = 'asl100'
 
-    logging.basicConfig(filename='output/{}.log'.format(os.path.basename(args.config_file)[:-4]), level=logging.DEBUG, filemode='w+')
+    split_file = os.path.join(root, 'data/splits/{}.json'.format(subset))
+    pose_data_root = os.path.join(root, 'data/pose_per_individual_videos')
+    config_file = os.path.join(root, 'code/TGCN/configs/{}.ini'.format(subset))
+    configs = Config(config_file)
+
+    logging.basicConfig(filename='output/{}.log'.format(os.path.basename(config_file)[:-4]), level=logging.DEBUG, filemode='w+')
 
     logging.info('Calling main.run()')
-    run(split_file=args.split_file, configs=configs, pose_data_root=args.pose_root, subset_name=args.subset_name)
+    run(split_file=split_file, configs=configs, pose_data_root=pose_data_root)
     logging.info('Finished main.run()')
     # utils.plot_curves()

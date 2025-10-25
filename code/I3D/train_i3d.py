@@ -185,7 +185,11 @@ def run(configs,
                     model_name = save_model + "nslt_" + str(num_classes) + "_" + str(steps).zfill(
                                    6) + '_%3f.pt' % val_score
 
-                    torch.save(i3d.module.state_dict(), model_name)
+                    # Handle both DataParallel and regular models
+                    if hasattr(i3d, 'module'):
+                        torch.save(i3d.module.state_dict(), model_name)
+                    else:
+                        torch.save(i3d.state_dict(), model_name)
                     print(model_name)
 
                 print('VALIDATION: {} Loc Loss: {:.4f} Cls Loss: {:.4f} Tot Loss: {:.4f} Accu :{:.4f}'.format(phase,

@@ -1,0 +1,229 @@
+import os
+import argparse
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.autograd import Variable
+from torch.optim.lr_scheduler import StepLR, MultiStepLR
+
+from torchvision import transforms
+import videotransforms
+
+import numpy as np
+
+from configs import Config
+from pytorch_i3d import InceptionI3d
+
+# from datasets.nslt_dataset import NSLT as Dataset
+from datasets.nslt_dataset import NSLT as Dataset
+
+from tqdm import tqdm
+import time
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-mode', type=str, help='rgb or flow')
+parser.add_argument('-save_model', type=str)
+parser.add_argument('-root', type=str)
+parser.add_argument('--num_class', type=int)
+
+args = parser.parse_args()
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+
+def run(configs,
+        mode='rgb',
+        root='/ssd/Charades_v1_rgb',
+        train_split='WLASL/nslt_leaveout_user01_updated.json',
+        save_model='',
+        weights=None):
+    print(configs)
+    
+    # setup dataset
+    train_transforms = transforms.Compose([videotransforms.RandomCrop(224)])
+                                           #videotransforms.RandomHorizontalFlip(), ])
+    
+    dataset = Dataset(train_split, 'train', root, mode, train_transforms)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=configs.batch_size, shuffle=True, num_workers=0,
+                                             pin_memory=True)
+
+    dataloaders = {'train': dataloader}
+    datasets = {'train': dataset}
+    
+    # setup the model
+    if mode == 'flow':
+        i3d = InceptionI3d(400, in_channels=2)
+        i3d.load_state_dict(torch.load('weights/flow_imagenet.pt'))
+    else:
+        i3d = InceptionI3d(400, in_channels=3)
+        i3d.load_state_dict(torch.load('weights/rgb_imagenet.pt'))
+
+    num_classes = dataset.num_classes
+
+    if weights:
+        print('loading weights {}'.format(weights))
+        i3d.load_state_dict(torch.load(weights))
+
+    i3d.replace_logits(num_classes)
+    
+    i3d.cuda()
+    i3d = nn.DataParallel(i3d)
+
+    # --- Print model summary ---
+    num_params = sum(p.numel() for p in i3d.parameters())
+    num_trainable = sum(p.numel() for p in i3d.parameters() if p.requires_grad)
+    
+    # Calculate model size in MB (approximate)
+    torch.save(i3d.state_dict(), "temp_model.pth")
+    model_size = os.path.getsize("temp_model.pth") / (1024 * 1024)
+    os.remove("temp_model.pth")
+    
+    print(f"\nModel Summary:")
+    print(f"  Total parameters: {num_params:,}")
+    print(f"  Trainable parameters: {num_trainable:,}")
+    print(f"  Model size (approx): {model_size:.2f} MB\n")
+    
+    lr = configs.init_lr
+    weight_decay = configs.adam_weight_decay
+    optimizer = optim.Adam(i3d.parameters(), lr=lr, weight_decay=weight_decay)
+
+    num_steps_per_update = configs.update_per_step  # accum gradient
+    steps = 0
+    epoch = 0
+
+    best_val_score = 0
+    # train it
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.3)
+    start_time = time.time()  # Start timer
+    while steps < configs.max_steps and epoch < 10:  # for epoch in range(num_epochs):
+        print('Step {}/{}'.format(steps, configs.max_steps))
+        print('-' * 10)
+
+        epoch += 1
+        # Each epoch has a training and validation phase
+        for phase in ['train']:
+            collected_vids = []
+
+            if phase == 'train':
+                i3d.train(True)
+            else:
+                i3d.train(False)  # Set model to evaluate mode
+
+            tot_loss = 0.0
+            tot_loc_loss = 0.0
+            tot_cls_loss = 0.0
+            num_iter = 0
+            optimizer.zero_grad()
+
+            #confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int)
+            confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
+            # Iterate over data.
+            #for data in dataloaders[phase]:
+            for data in tqdm(dataloaders[phase], desc=f'{phase} epoch {epoch}'):
+                num_iter += 1
+                # get the inputs
+                if data == -1: # bracewell does not compile opencv with ffmpeg, strange errors occur resulting in no video loaded
+                    continue
+
+                # inputs, labels, vid, src = data
+                inputs, labels, vid = data
+
+                # wrap them in Variable
+                inputs = inputs.cuda()
+                t = inputs.size(2)
+                labels = labels.cuda()
+
+                per_frame_logits = i3d(inputs, pretrained=False)
+                # upsample to input size
+                per_frame_logits = F.upsample(per_frame_logits, t, mode='linear')
+
+                # compute localization loss
+                loc_loss = F.binary_cross_entropy_with_logits(per_frame_logits, labels)
+                tot_loc_loss += loc_loss.data.item()
+
+                predictions = torch.max(per_frame_logits, dim=2)[0]
+                gt = torch.max(labels, dim=2)[0]
+
+                # compute classification loss (with max-pooling along time B x C x T)
+                cls_loss = F.binary_cross_entropy_with_logits(torch.max(per_frame_logits, dim=2)[0],
+                                                              torch.max(labels, dim=2)[0])
+                tot_cls_loss += cls_loss.data.item()
+
+                for i in range(per_frame_logits.shape[0]):
+                    confusion_matrix[torch.argmax(gt[i]).item(), torch.argmax(predictions[i]).item()] += 1
+
+                loss = (0.5 * loc_loss + 0.5 * cls_loss) / num_steps_per_update
+                tot_loss += loss.data.item()
+                if num_iter == num_steps_per_update // 2:
+                    print(epoch, steps, loss.data.item())
+                loss.backward()
+
+                if num_iter == num_steps_per_update and phase == 'train':
+                    steps += 1
+                    num_iter = 0
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    # lr_sched.step()
+                    if steps % 10 == 0:
+                        acc = float(np.trace(confusion_matrix)) / np.sum(confusion_matrix)
+                        print(
+                            'Epoch {} {} Loc Loss: {:.4f} Cls Loss: {:.4f} Tot Loss: {:.4f} Accu :{:.4f}'.format(epoch,
+                                                                                                                 phase,
+                                                                                                                 tot_loc_loss / (10 * num_steps_per_update),
+                                                                                                                 tot_cls_loss / (10 * num_steps_per_update),
+                                                                                                                 tot_loss / 10,
+                                                                                                                 acc))
+                        tot_loss = tot_loc_loss = tot_cls_loss = 0.
+
+                if num_iter > 0:
+                    scheduler.step(tot_loss * num_steps_per_update / num_iter)
+        # End of each epoch
+        epoch_acc = float(np.trace(confusion_matrix)) / np.sum(confusion_matrix)
+        epoch_loc_loss = tot_loc_loss / max(1, len(dataloaders[phase]))
+        epoch_cls_loss = tot_cls_loss / max(1, len(dataloaders[phase]))
+        epoch_total_loss = 0.5 * (epoch_loc_loss + epoch_cls_loss)
+        
+        print(f"\nEpoch {epoch} completed:")
+        print(f"  Train Localization Loss: {epoch_loc_loss:.4f}")
+        print(f"  Train Classification Loss: {epoch_cls_loss:.4f}")
+        print(f"  Train Total Loss: {epoch_total_loss:.4f}")
+        print(f"  Train Accuracy: {epoch_acc:.4f}\n")
+
+        # 💾 Save after each epoch
+        model_name = os.path.join(save_model, f"nslt_{num_classes}_epoch{epoch:02d}.pt")
+        torch.save(i3d.module.state_dict(), model_name)
+        print(f"Model saved after epoch {epoch}: {model_name}")
+        
+    end_time = time.time()  # End timer
+    total_time = end_time - start_time
+    # Convert to hours, minutes, seconds
+    hrs = int(total_time // 3600)
+    mins = int((total_time % 3600) // 60)
+    secs = int(total_time % 60)
+    
+    print(f"Total training time: {hrs}h {mins}m {secs}s")
+
+if __name__ == '__main__':
+    # WLASL setting
+    mode = 'rgb'
+    root = {'word': 'WLASL/videos'}
+
+    save_model = 'WLASL/checkpoints/'
+    train_split = 'WLASL/nslt_leaveout_user01_updated.json'
+
+    weights = 'weights/rgb_imagenet.pt'
+    #weights = None
+    config_file = 'WLASL/code/I3D/configfiles/asl2000.ini'
+
+    configs = Config(config_file)
+    print(root, train_split)
+    run(configs=configs, mode=mode, root=root, save_model=save_model, train_split=train_split, weights=weights)
